@@ -66,7 +66,7 @@ const settings = definePluginSettings({
     },
     customSoundUrl: {
         type: OptionType.STRING,
-        description: "Custom sound URL (trusted domains only)",
+        description: "Custom sound URL (for priority channels when not using text filters)",
         default: "",
         placeholder: "https://cdn.discordapp.com/attachments/.../sound.mp3"
     },
@@ -107,7 +107,7 @@ const settings = definePluginSettings({
     },
     textFilters: {
         type: OptionType.STRING,
-        description: "Text filters - Format: keyword:url,keyword:url (e.g., urgent:https://example.com/urgent.mp3,help:https://example.com/help.wav)",
+        description: "Text filters - Format: keyword:audio_url,keyword:audio_url (e.g., urgent:https://example.com/urgent.mp3,help:https://example.com/help.wav)",
         default: "urgent:https://cdn.discordapp.com/attachments/123456789/urgent.mp3,emergency:https://cdn.discordapp.com/attachments/123456789/emergency.wav",
         placeholder: "urgent:https://example.com/urgent.mp3,help:https://example.com/help.wav"
     },
@@ -355,28 +355,38 @@ function parseTextFilters(): TextFilter[] {
 
 function checkTextFilters(content: string): TextFilter | null {
     const filters = parseTextFilters();
-    if (filters.length === 0) return null;
+    if (filters.length === 0) {
+        log("info", "No text filters configured");
+        return null;
+    }
+    
+    log("info", `Checking ${filters.length} text filters against content: "${content}"`);
     
     for (const filter of filters) {
         let searchText = filter.caseSensitive ? content : content.toLowerCase();
         let keyword = filter.caseSensitive ? filter.keyword : filter.keyword.toLowerCase();
+        
+        log("info", `Testing filter "${keyword}" (caseSensitive: ${filter.caseSensitive}, wholeWord: ${filter.wholeWord}) against "${searchText}"`);
         
         let found = false;
         if (filter.wholeWord) {
             // Match whole words only
             const regex = new RegExp(`\\b${keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
             found = regex.test(searchText);
+            log("info", `Whole word regex test: ${found}`);
         } else {
             // Match anywhere in text
             found = searchText.includes(keyword);
+            log("info", `Substring test: ${found}`);
         }
         
         if (found) {
-            log("info", `Text filter triggered: "${filter.keyword}" -> ${filter.soundType}`);
+            log("info", `Text filter MATCHED: "${filter.keyword}" -> ${filter.soundType || 'custom URL'}`);
             return filter;
         }
     }
     
+    log("info", "No text filters matched");
     return null;
 }
 
@@ -507,7 +517,9 @@ function handleMessage(data: any) {
         const textFilterPriority = settings.store.textFilterPriority;
         
         // Check for text filters
-        const textFilter = settings.store.enableTextFilters ? checkTextFilters(message.content || "") : null;
+        const messageContent = message.content || "";
+        log("info", `Processing message: "${messageContent}" in channel ${message.channel_id}`);
+        const textFilter = settings.store.enableTextFilters ? checkTextFilters(messageContent) : null;
         
         let shouldTriggerAlert = false;
         let alertTextFilter: TextFilter | undefined = undefined;
@@ -519,14 +531,15 @@ function handleMessage(data: any) {
             alertTextFilter = textFilter;
             log("info", `Text filter triggered globally: "${textFilter.keyword}" in channel ${message.channel_id}`);
         } else if (textFilterPriority === "both") {
-            // Text filters work everywhere, priority channels use default sound
-            if (textFilter && !isPriorityChannel) {
+            // Text filters work everywhere AND priority channels always notify
+            if (textFilter) {
+                // Text filter found - use it regardless of channel
                 shouldTriggerAlert = true;
                 alertTextFilter = textFilter;
-                log("info", `Text filter triggered: "${textFilter.keyword}" in channel ${message.channel_id}`);
+                log("info", `Text filter triggered: "${textFilter.keyword}" in channel ${message.channel_id} ${isPriorityChannel ? '(priority channel)' : '(regular channel)'}`);
             } else if (isPriorityChannel) {
+                // No text filter but it's a priority channel - use default sound
                 shouldTriggerAlert = true;
-                // Use default sound for priority channels in "both" mode
                 log("info", `Priority channel message (default sound): ${message.channel_id}`);
             }
         } else if (textFilterPriority === "channel" || !textFilterPriority) {
