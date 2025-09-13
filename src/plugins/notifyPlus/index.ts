@@ -106,9 +106,9 @@ const settings = definePluginSettings({
     },
     textFilters: {
         type: OptionType.STRING,
-        description: "Text filters (JSON format): [{\"keyword\":\"urgent\",\"soundType\":\"urgent\",\"caseSensitive\":false,\"wholeWord\":false}]",
-        default: '[{"keyword":"urgent","soundType":"urgent","caseSensitive":false,"wholeWord":false},{"keyword":"emergency","soundType":"double","caseSensitive":false,"wholeWord":true}]',
-        placeholder: "JSON array of text filters"
+        description: "Text filters - Format: keyword:sound,keyword:sound (e.g., urgent:urgent,emergency:double)",
+        default: "urgent:urgent,emergency:double",
+        placeholder: "urgent:urgent,help:double,important:beep"
     },
     textFilterPriority: {
         type: OptionType.SELECT,
@@ -119,6 +119,21 @@ const settings = definePluginSettings({
             { label: "Both (text filters work everywhere, priority channels use default sound)", value: "both" }
         ],
         default: "channel"
+    },
+    advancedTextFilters: {
+        type: OptionType.BOOLEAN,
+        description: "Enable advanced text filter options (case sensitivity, whole word matching)",
+        default: false
+    },
+    textFilterCaseSensitive: {
+        type: OptionType.BOOLEAN,
+        description: "Make text filters case sensitive",
+        default: false
+    },
+    textFilterWholeWord: {
+        type: OptionType.BOOLEAN,
+        description: "Match whole words only",
+        default: false
     }
 });
 
@@ -263,19 +278,62 @@ function parseTextFilters(): TextFilter[] {
             return [];
         }
         
-        const filters = JSON.parse(settings.store.textFilters);
-        if (!Array.isArray(filters)) {
-            log("warn", "Text filters must be an array");
-            return [];
+        const filtersString = settings.store.textFilters.trim();
+        
+        // Handle legacy JSON format for backward compatibility
+        if (filtersString.startsWith('[')) {
+            try {
+                const filters = JSON.parse(filtersString);
+                if (!Array.isArray(filters)) {
+                    log("warn", "Text filters must be an array");
+                    return [];
+                }
+                
+                return filters.filter((filter: any) => {
+                    if (typeof filter !== 'object' || !filter.keyword || !filter.soundType) {
+                        log("warn", "Invalid text filter format", filter);
+                        return false;
+                    }
+                    return true;
+                });
+            } catch (error) {
+                log("error", "Failed to parse legacy JSON text filters", error);
+                return [];
+            }
         }
         
-        return filters.filter((filter: any) => {
-            if (typeof filter !== 'object' || !filter.keyword || !filter.soundType) {
-                log("warn", "Invalid text filter format", filter);
-                return false;
+        // Parse new simple format: keyword:sound,keyword:sound
+        const filterPairs = filtersString.split(',').map(pair => pair.trim()).filter(pair => pair);
+        const parsedFilters: TextFilter[] = [];
+        
+        for (const pair of filterPairs) {
+            const [keyword, soundType] = pair.split(':').map(part => part.trim());
+            
+            if (!keyword || !soundType) {
+                log("warn", `Invalid filter format: "${pair}". Expected format: keyword:sound`);
+                continue;
             }
-            return true;
-        });
+            
+            // Validate sound type
+            const validSounds = ['beep', 'double', 'urgent'];
+            if (!validSounds.includes(soundType)) {
+                log("warn", `Invalid sound type "${soundType}" in filter "${pair}". Valid types: ${validSounds.join(', ')}`);
+                continue;
+            }
+            
+            parsedFilters.push({
+                keyword: keyword,
+                soundType: soundType,
+                caseSensitive: settings.store.advancedTextFilters ? settings.store.textFilterCaseSensitive : false,
+                wholeWord: settings.store.advancedTextFilters ? settings.store.textFilterWholeWord : false
+            });
+        }
+        
+        if (parsedFilters.length > 0) {
+            log("info", `Loaded ${parsedFilters.length} text filters`);
+        }
+        
+        return parsedFilters;
     } catch (error) {
         log("error", "Failed to parse text filters", error);
         return [];
