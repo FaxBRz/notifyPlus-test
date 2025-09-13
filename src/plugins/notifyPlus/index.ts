@@ -21,6 +21,7 @@ interface PluginStats {
 interface TextFilter {
     keyword: string;
     soundType: string;
+    customUrl?: string;
     caseSensitive: boolean;
     wholeWord: boolean;
 }
@@ -106,9 +107,9 @@ const settings = definePluginSettings({
     },
     textFilters: {
         type: OptionType.STRING,
-        description: "Text filters - Format: keyword:sound,keyword:sound (e.g., urgent:urgent,emergency:double)",
-        default: "urgent:urgent,emergency:double",
-        placeholder: "urgent:urgent,help:double,important:beep"
+        description: "Text filters - Format: keyword:url,keyword:url (e.g., urgent:https://example.com/urgent.mp3,help:https://example.com/help.wav)",
+        default: "urgent:https://cdn.discordapp.com/attachments/123456789/urgent.mp3,emergency:https://cdn.discordapp.com/attachments/123456789/emergency.wav",
+        placeholder: "urgent:https://example.com/urgent.mp3,help:https://example.com/help.wav"
     },
     textFilterPriority: {
         type: OptionType.SELECT,
@@ -220,17 +221,20 @@ function generateSound(type: string, volume: number) {
 
 function playCustomSound(url: string, volume: number) {
     try {
-        if (!isSafeUrl(url)) {
-            log("warn", "Unsafe URL blocked, using fallback sound");
-            generateSound("urgent", volume);
-            return;
-        }
-
+        log("info", `Playing custom sound from: ${url}`);
+        
         const audio = new Audio(url);
         audio.volume = volume / 100;
         
-        audio.onerror = () => generateSound("urgent", volume);
-        audio.play().catch(() => generateSound("urgent", volume));
+        audio.onerror = (error) => {
+            log("warn", `Custom sound failed to load: ${url}`, error);
+            generateSound("urgent", volume);
+        };
+        
+        audio.play().catch((error) => {
+            log("warn", `Custom sound failed to play: ${url}`, error);
+            generateSound("urgent", volume);
+        });
     } catch (error) {
         log("error", "Custom sound failed", error);
         generateSound("urgent", volume);
@@ -302,28 +306,37 @@ function parseTextFilters(): TextFilter[] {
             }
         }
         
-        // Parse new simple format: keyword:sound,keyword:sound
+        // Parse new URL format: keyword:url,keyword:url
         const filterPairs = filtersString.split(',').map(pair => pair.trim()).filter(pair => pair);
         const parsedFilters: TextFilter[] = [];
         
         for (const pair of filterPairs) {
-            const [keyword, soundType] = pair.split(':').map(part => part.trim());
-            
-            if (!keyword || !soundType) {
-                log("warn", `Invalid filter format: "${pair}". Expected format: keyword:sound`);
+            const colonIndex = pair.indexOf(':');
+            if (colonIndex === -1) {
+                log("warn", `Invalid filter format: "${pair}". Expected format: keyword:url`);
                 continue;
             }
             
-            // Validate sound type
-            const validSounds = ['beep', 'double', 'urgent'];
-            if (!validSounds.includes(soundType)) {
-                log("warn", `Invalid sound type "${soundType}" in filter "${pair}". Valid types: ${validSounds.join(', ')}`);
+            const keyword = pair.substring(0, colonIndex).trim();
+            const url = pair.substring(colonIndex + 1).trim();
+            
+            if (!keyword || !url) {
+                log("warn", `Invalid filter format: "${pair}". Both keyword and URL are required`);
+                continue;
+            }
+            
+            // Validate URL format
+            try {
+                new URL(url);
+            } catch {
+                log("warn", `Invalid URL in filter "${pair}": ${url}`);
                 continue;
             }
             
             parsedFilters.push({
                 keyword: keyword,
-                soundType: soundType,
+                soundType: "custom", // Always custom for URL-based filters
+                customUrl: url,
                 caseSensitive: settings.store.advancedTextFilters ? settings.store.textFilterCaseSensitive : false,
                 wholeWord: settings.store.advancedTextFilters ? settings.store.textFilterWholeWord : false
             });
@@ -438,17 +451,18 @@ function triggerAlert(message: any, textFilter?: TextFilter) {
         
         // Use text filter sound if available, otherwise use default settings
         const effectiveSoundType = textFilter?.soundType || soundType;
+        const effectiveCustomUrl = textFilter?.customUrl || customSoundUrl;
         const isTextFilter = !!textFilter;
         
         if (isTextFilter) {
             stats.textFiltersTriggered++;
-            log("info", `Using text filter sound: ${effectiveSoundType}`);
+            log("info", `Using text filter: "${textFilter.keyword}" with ${textFilter.customUrl ? 'custom URL' : 'sound type'}: ${effectiveSoundType}`);
         }
 
         if (alertType === "sound" || alertType === "all") {
-            if (effectiveSoundType === "custom" && customSoundUrl && !isTextFilter) {
-                // Only use custom URL for non-text filters
-                playCustomSound(customSoundUrl, volume);
+            if (effectiveSoundType === "custom" && effectiveCustomUrl) {
+                // Use custom URL from text filter or global setting
+                playCustomSound(effectiveCustomUrl, volume);
             } else {
                 generateSound(effectiveSoundType || "urgent", volume);
             }
